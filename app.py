@@ -169,6 +169,79 @@ def run_interactive_cli(agent: InventoryDecisionAgent):
         print("=" * 80)
 
 
+def analyze_inventory_dataframe(df: Any) -> Dict[str, Any]:
+    """
+    Performs deterministic pandas analytics on an uploaded inventory dataset.
+    Validates required columns: Product, Category, Units, Unit Cost.
+    Calculates:
+      1. Total Units
+      2. Average Unit Cost
+      3. Product with highest Units
+      4. Total Units grouped by Category
+      5. Inventory Value = Units * Unit Cost
+      6. Total Inventory Value across all products
+    """
+    import pandas as pd
+
+    required_columns = ["Product", "Category", "Units", "Unit Cost"]
+    missing_columns = [col for col in required_columns if col not in df.columns]
+
+    if missing_columns:
+        return {
+            "valid": False,
+            "missing_columns": missing_columns,
+            "found_columns": list(df.columns),
+            "rows": len(df),
+            "columns": len(df.columns),
+        }
+
+    df_calc = df.copy()
+    df_calc["Units"] = pd.to_numeric(df_calc["Units"], errors="coerce").fillna(0)
+    df_calc["Unit Cost"] = pd.to_numeric(df_calc["Unit Cost"], errors="coerce").fillna(0.0)
+
+    # 1. Calculate total Units
+    total_units = float(df_calc["Units"].sum())
+
+    # 2. Calculate average Unit Cost
+    avg_unit_cost = float(df_calc["Unit Cost"].mean()) if len(df_calc) > 0 else 0.0
+
+    # 3. Identify the Product with the highest Units
+    if not df_calc.empty:
+        max_units_idx = df_calc["Units"].idxmax()
+        product_highest_units = str(df_calc.loc[max_units_idx, "Product"])
+        highest_units_val = float(df_calc.loc[max_units_idx, "Units"])
+    else:
+        product_highest_units = "N/A"
+        highest_units_val = 0.0
+
+    # 4. Group data by Category and calculate total Units for each Category
+    category_units_df = (
+        df_calc.groupby("Category", as_index=False)["Units"]
+        .sum()
+        .rename(columns={"Units": "Total Units"})
+    )
+
+    # 5. Create new calculated column: Inventory Value = Units * Unit Cost
+    df_calc["Inventory Value"] = df_calc["Units"] * df_calc["Unit Cost"]
+
+    # 6. Calculate total Inventory Value across all products
+    total_inventory_value = float(df_calc["Inventory Value"].sum())
+
+    return {
+        "valid": True,
+        "rows": len(df),
+        "columns": len(df.columns),
+        "column_names": list(df.columns),
+        "total_units": total_units,
+        "avg_unit_cost": avg_unit_cost,
+        "product_highest_units": product_highest_units,
+        "highest_units_val": highest_units_val,
+        "category_units_df": category_units_df,
+        "total_inventory_value": total_inventory_value,
+        "analyzed_df": df_calc,
+    }
+
+
 def run_streamlit_app():
     """
     Renders the Streamlit Web Application when launched via `streamlit run app.py`.
@@ -196,6 +269,15 @@ def run_streamlit_app():
     preset_choice = st.sidebar.selectbox(
         "Load Benchmark Question:",
         ["Custom Question"] + [s["title"] for s in BENCHMARK_SCENARIOS],
+    )
+
+    # Sidebar: Data Upload Section (Last section on the left sidebar)
+    st.sidebar.markdown("---")
+    st.sidebar.header("Data Upload")
+    uploaded_file = st.sidebar.file_uploader(
+        "Upload CSV File",
+        type=["csv"],
+        help="Upload an inventory CSV file with Product, Category, Units, and Unit Cost columns.",
     )
 
     default_text = ""
@@ -244,6 +326,67 @@ def run_streamlit_app():
 
         # Main explanation output
         st.markdown(response.explanation)
+
+    # -------------------------------------------------------------------------
+    # Main Page: CSV Data Processing & Analysis
+    # -------------------------------------------------------------------------
+    if uploaded_file is not None:
+        import pandas as pd
+
+        st.markdown("---")
+        st.header("📊 Uploaded Inventory Data Analysis")
+
+        try:
+            # 1. Read the CSV file into a pandas DataFrame
+            df = pd.read_csv(uploaded_file)
+
+            # Analyze the dataframe using pandas
+            analysis = analyze_inventory_dataframe(df)
+
+            # 2 & 3. Validate columns and display clear error message if missing
+            if not analysis["valid"]:
+                st.error(
+                    f"❌ **Validation Error**: The uploaded CSV file is missing required column(s): "
+                    f"**{', '.join(analysis['missing_columns'])}**.\n\n"
+                    f"Required columns are: `Product, Category, Units, Unit Cost`.\n\n"
+                    f"Columns found in uploaded file: `{', '.join(analysis['found_columns'])}`."
+                )
+            else:
+                # 4 & 5. Display uploaded dataframe metadata and raw table in main page
+                st.subheader("1. Dataset Overview & Dimensions")
+                meta_col1, meta_col2, meta_col3 = st.columns(3)
+                meta_col1.metric("Number of Rows", f"{analysis['rows']:,}")
+                meta_col2.metric("Number of Columns", f"{analysis['columns']:,}")
+                meta_col3.write(f"**Column Names:**\n`{', '.join(analysis['column_names'])}`")
+
+                st.caption("Uploaded Raw Dataframe Preview:")
+                st.dataframe(df, use_container_width=True)
+
+                # RESULTS: Display results clearly in main application
+                st.subheader("2. Summary Metrics")
+                kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+                kpi1.metric("Total Units", f"{analysis['total_units']:,.0f}")
+                kpi2.metric("Average Unit Cost", f"${analysis['avg_unit_cost']:,.2f}")
+                kpi3.metric("Highest Units Product", analysis["product_highest_units"], f"{analysis['highest_units_val']:,.0f} units")
+                kpi4.metric("Total Inventory Value", f"${analysis['total_inventory_value']:,.2f}")
+
+                # Total Units by Category
+                st.subheader("3. Total Units by Category")
+                st.dataframe(analysis["category_units_df"], use_container_width=True)
+
+                # Dataframe including the new Inventory Value column with currency formatting
+                st.subheader("4. Inventory Data with Calculated Inventory Value")
+                st.dataframe(
+                    analysis["analyzed_df"].style.format({
+                        "Units": "{:,.0f}",
+                        "Unit Cost": "${:,.2f}",
+                        "Inventory Value": "${:,.2f}",
+                    }),
+                    use_container_width=True,
+                )
+
+        except Exception as err:
+            st.error(f"❌ Error reading or analyzing CSV file: {err}")
 
 
 
