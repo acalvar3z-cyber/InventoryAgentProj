@@ -406,6 +406,28 @@ def classify_multicriteria_inventory(
         axis=1,
     )
 
+    # Numerical scoring based on classification (A=4, B=3, C=2, D=1)
+    score_mapping = {"A": 4, "B": 3, "C": 2, "D": 1}
+    df_calc["Sales Score"] = df_calc["Sales Class"].map(score_mapping).fillna(1).astype(int)
+    df_calc["Hits Score"] = df_calc["Hits Class"].map(score_mapping).fillna(1).astype(int)
+
+    # Reorder columns to present original attributes followed by classification & scores
+    desired_cols = [
+        item_num_col,
+        item_name_col,
+        uom_col,
+        sales_col,
+        hits_col,
+        "Sales Class",
+        "Sales Score",
+        "Hits Class",
+        "Hits Score",
+        "Joint Class",
+        "Classification",
+    ]
+    extra_cols = [c for c in df_calc.columns if c not in desired_cols]
+    df_calc = df_calc[[c for c in desired_cols if c in df_calc.columns] + extra_cols]
+
     # Cross-tabulation Matrix (Sales Class x Hits Class)
     crosstab_df = pd.crosstab(
         df_calc["Sales Class"],
@@ -626,6 +648,8 @@ def run_streamlit_app():
                         filtered_df.style.format({
                             s_col: "${:,.2f}",
                             h_col: "{:,.0f}",
+                            "Sales Score": "{:d}",
+                            "Hits Score": "{:d}",
                         }),
                         use_container_width=True,
                     )
