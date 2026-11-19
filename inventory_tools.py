@@ -1526,3 +1526,266 @@ def calculate_newsvendor(
         demand_mean=mu_val,
         demand_std=sig_val,
     )
+
+
+# ============================================================================
+# 6. Multicriteria Inventory Classification (BAN 517 Methodology)
+# ============================================================================
+
+@dataclass
+class MulticriteriaClassificationResult:
+    # 8 Student Verification Components
+    inputs_extracted: Dict[str, Any]
+    variable_definitions: Dict[str, str]
+    formula: Dict[str, str]
+    formula_with_substituted_values: Dict[str, str]
+    intermediate_calculations: Dict[str, Any]
+    final_answer: Dict[str, Any]
+    verification_checks: List[Dict[str, Any]]
+    assumptions: List[str]
+
+    # Typed Attributes
+    sales_class: str
+    sales_score: int
+    hits_class: str
+    hits_score: int
+    sales_weight: float
+    hits_weight: float
+    combined_weighted_score: float
+    final_inventory_class: str
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "sales_class": self.sales_class,
+            "sales_score": self.sales_score,
+            "hits_class": self.hits_class,
+            "hits_score": self.hits_score,
+            "sales_weight": self.sales_weight,
+            "hits_weight": self.hits_weight,
+            "combined_weighted_score": self.combined_weighted_score,
+            "final_inventory_class": self.final_inventory_class,
+            "inputs_extracted": self.inputs_extracted,
+            "variable_definitions": self.variable_definitions,
+            "formula": self.formula,
+            "formula_with_substituted_values": self.formula_with_substituted_values,
+            "intermediate_calculations": self.intermediate_calculations,
+            "final_answer": self.final_answer,
+            "verification_checks": self.verification_checks,
+            "assumptions": self.assumptions,
+        }
+
+
+def calculate_multicriteria_classification(
+    sales_class: Optional[str] = None,
+    hits_class: Optional[str] = None,
+    sales_score: Optional[Union[int, float]] = None,
+    hits_score: Optional[Union[int, float]] = None,
+    sales_weight: float = 0.65,
+    hits_weight: float = 0.35,
+) -> MulticriteriaClassificationResult:
+    """
+    Deterministic Multicriteria Inventory Classification Calculator (BAN 517 Methodology).
+    Stratifies inventory using two criteria: Sales and POS (Point-of-Sale) Hits.
+
+    Step 1 - Classify Sales and POS Hits Separately
+      Pareto Cumulative Thresholds:
+        A: 0-60%
+        B: 61-80%
+        C: 81-90%
+        D: 91-100%
+      Numerical Score Mapping:
+        A = 4, B = 3, C = 2, D = 1
+
+    Step 2 - Calculate the Combined Weighted Score
+      Combined Weighted Score = 0.65(Sales Score) + 0.35(Hits Score)
+
+    Step 3 - Assign the Final Inventory Class
+      Final Inventory Class | Combined Weighted Score
+      A                     | 4.00 - 3.25
+      B                     | 3.24 - 2.50
+      C                     | 2.49 - 1.75
+      D                     | < 1.75
+
+    Returns MulticriteriaClassificationResult with all 8 student verification sections.
+    """
+    score_mapping = {"A": 4, "B": 3, "C": 2, "D": 1}
+    class_mapping = {4: "A", 3: "B", 2: "C", 1: "D"}
+
+    # Resolve Sales Class & Score
+    if sales_class is not None:
+        sc_clean = str(sales_class).strip().upper()
+        if sc_clean not in score_mapping:
+            raise ValueError(f"Invalid sales_class '{sales_class}'. Must be one of: A, B, C, D.")
+        s_class = sc_clean
+        s_score = score_mapping[sc_clean]
+    elif sales_score is not None:
+        try:
+            s_score = int(round(float(sales_score)))
+        except (ValueError, TypeError):
+            raise ValueError(f"Invalid sales_score '{sales_score}'. Must be integer 1, 2, 3, or 4.")
+        if s_score not in class_mapping:
+            raise ValueError(f"Invalid sales_score {s_score}. Must be in [1, 4] corresponding to D, C, B, A.")
+        s_class = class_mapping[s_score]
+    else:
+        raise ValueError("Missing required input: sales_class or sales_score must be provided.")
+
+    # Resolve Hits Class & Score
+    if hits_class is not None:
+        hc_clean = str(hits_class).strip().upper()
+        if hc_clean not in score_mapping:
+            raise ValueError(f"Invalid hits_class '{hits_class}'. Must be one of: A, B, C, D.")
+        h_class = hc_clean
+        h_score = score_mapping[hc_clean]
+    elif hits_score is not None:
+        try:
+            h_score = int(round(float(hits_score)))
+        except (ValueError, TypeError):
+            raise ValueError(f"Invalid hits_score '{hits_score}'. Must be integer 1, 2, 3, or 4.")
+        if h_score not in class_mapping:
+            raise ValueError(f"Invalid hits_score {h_score}. Must be in [1, 4] corresponding to D, C, B, A.")
+        h_class = class_mapping[h_score]
+    else:
+        raise ValueError("Missing required input: hits_class or hits_score must be provided.")
+
+    # Validate weights
+    w_sales = float(sales_weight)
+    w_hits = float(hits_weight)
+    if w_sales < 0 or w_hits < 0:
+        raise ValueError("Weights cannot be negative.")
+    if abs((w_sales + w_hits) - 1.0) > 1e-4:
+        raise ValueError(f"Weights must sum to 1.0. Given: sales_weight={w_sales}, hits_weight={w_hits} (sum={w_sales + w_hits}).")
+
+    # Step 2: Combined Weighted Score
+    # Combined Weighted Score = 0.65(Sales Score) + 0.35(Hits Score)
+    part_sales = round(w_sales * s_score, 4)
+    part_hits = round(w_hits * h_score, 4)
+    combined_score = round(w_sales * s_score + w_hits * h_score, 2)
+
+    # Step 3: Assign Final Inventory Class
+    if combined_score >= 3.25:
+        final_class = "A"
+    elif combined_score >= 2.50:
+        final_class = "B"
+    elif combined_score >= 1.75:
+        final_class = "C"
+    else:
+        final_class = "D"
+
+    # 1. Inputs Extracted
+    inputs_extracted = {
+        "sales_class": s_class,
+        "sales_score": s_score,
+        "hits_class": h_class,
+        "hits_score": h_score,
+        "sales_weight": w_sales,
+        "hits_weight": w_hits,
+        "sales_weight_pct": f"{w_sales * 100:.1f}%",
+        "hits_weight_pct": f"{w_hits * 100:.1f}%",
+    }
+
+    # 2. Variable Definitions
+    variable_definitions = {
+        "Sales Class": "Pareto tier for sales revenue / financial velocity (A: 0-60%, B: 61-80%, C: 81-90%, D: 91-100%)",
+        "Sales Score": "Numerical score assigned to Sales Class (A=4, B=3, C=2, D=1)",
+        "Hits Class": "Pareto tier for POS pick/transaction frequency (A: 0-60%, B: 61-80%, C: 81-90%, D: 91-100%)",
+        "Hits Score": "Numerical score assigned to Hits Class (A=4, B=3, C=2, D=1)",
+        "Sales Weight (w_sales)": f"Relative weight assigned to financial velocity ({w_sales * 100:.0f}%)",
+        "Hits Weight (w_hits)": f"Relative weight assigned to warehouse pick activity ({w_hits * 100:.0f}%)",
+        "Combined Weighted Score": "Multi-attribute composite score: Combined Weighted Score = w_sales(Sales Score) + w_hits(Hits Score)",
+        "Final Inventory Class": "Overall SKU priority class: A (4.00-3.25), B (3.24-2.50), C (2.49-1.75), D (< 1.75)",
+    }
+
+    # 3. Formula
+    formula = {
+        "Step 1 - Score Conversion": r"\text{Score}(A) = 4, \quad \text{Score}(B) = 3, \quad \text{Score}(C) = 2, \quad \text{Score}(D) = 1",
+        "Step 2 - Combined Weighted Score": r"\text{Combined Weighted Score} = 0.65(\text{Sales Score}) + 0.35(\text{Hits Score})",
+        "Step 3 - Final Class Thresholds": r"A: [3.25, 4.00], \quad B: [2.50, 3.24], \quad C: [1.75, 2.49], \quad D: < 1.75",
+    }
+
+    # 4. Formula with Substituted Values
+    formula_with_substituted_values = {
+        "Step 1 - Score Conversion": rf"\text{{Sales Score}} = {s_score} \ (\text{{Class }} {s_class}), \quad \text{{Hits Score}} = {h_score} \ (\text{{Class }} {h_class})",
+        "Step 2 - Combined Weighted Score": rf"\text{{Combined Weighted Score}} = 0.65({s_score}) + 0.35({h_score}) = {part_sales:.2f} + {part_hits:.2f} = \mathbf{{{combined_score:.2f}}}",
+        "Step 3 - Final Class Thresholds": rf"\text{{Score }} {combined_score:.2f} \implies \mathbf{{\text{{Final Class }} {final_class}}}",
+    }
+
+    # 5. Intermediate Calculations
+    intermediate = {
+        "sales_score": s_score,
+        "hits_score": h_score,
+        "weighted_sales_component": part_sales,
+        "weighted_hits_component": part_hits,
+        "combined_weighted_score": combined_score,
+        "final_inventory_class": final_class,
+    }
+
+    # 6. Final Answer
+    final_ans = {
+        "final_inventory_class": final_class,
+        "combined_weighted_score": combined_score,
+        "sales_class": s_class,
+        "sales_score": s_score,
+        "hits_class": h_class,
+        "hits_score": h_score,
+    }
+
+    # 7. Verification Checks
+    verification_checks = [
+        {
+            "check": "Weights Sum to 1.0 (100%)",
+            "passed": abs((w_sales + w_hits) - 1.0) < 1e-4,
+            "details": f"w_sales ({w_sales:.2f}) + w_hits ({w_hits:.2f}) = {w_sales + w_hits:.2f}",
+        },
+        {
+            "check": "Sales Score within Valid Range [1, 4]",
+            "passed": 1 <= s_score <= 4,
+            "details": f"Sales Score = {s_score} (Class {s_class})",
+        },
+        {
+            "check": "Hits Score within Valid Range [1, 4]",
+            "passed": 1 <= h_score <= 4,
+            "details": f"Hits Score = {h_score} (Class {h_class})",
+        },
+        {
+            "check": "Combined Weighted Score within Theoretical Bounds [1.00, 4.00]",
+            "passed": 1.00 <= combined_score <= 4.00,
+            "details": f"Calculated Combined Weighted Score = {combined_score:.2f}",
+        },
+        {
+            "check": "Final Inventory Class Threshold Consistency",
+            "passed": (
+                (final_class == "A" and combined_score >= 3.25)
+                or (final_class == "B" and 2.50 <= combined_score < 3.25)
+                or (final_class == "C" and 1.75 <= combined_score < 2.50)
+                or (final_class == "D" and combined_score < 1.75)
+            ),
+            "details": f"Score {combined_score:.2f} assigned to Class {final_class}",
+        },
+    ]
+
+    # 8. Assumptions
+    assumptions = [
+        "Step 1: Sales and POS Hits are ranked independently using Pareto cumulative thresholds: A (0-60%), B (61-80%), C (81-90%), D (91-100%).",
+        "Classification to numerical score mapping follows: A = 4, B = 3, C = 2, D = 1.",
+        "Step 2: Combined Weighted Score applies a 65% weight to Sales and a 35% weight to POS Hits: Combined Weighted Score = 0.65(Sales Score) + 0.35(Hits Score).",
+        "Step 3: Final Inventory Class follows rubric boundaries: A (4.00-3.25), B (3.24-2.50), C (2.49-1.75), D (< 1.75).",
+    ]
+
+    return MulticriteriaClassificationResult(
+        inputs_extracted=inputs_extracted,
+        variable_definitions=variable_definitions,
+        formula=formula,
+        formula_with_substituted_values=formula_with_substituted_values,
+        intermediate_calculations=intermediate,
+        final_answer=final_ans,
+        verification_checks=verification_checks,
+        assumptions=assumptions,
+        sales_class=s_class,
+        sales_score=s_score,
+        hits_class=h_class,
+        hits_score=h_score,
+        sales_weight=w_sales,
+        hits_weight=w_hits,
+        combined_weighted_score=combined_score,
+        final_inventory_class=final_class,
+    )

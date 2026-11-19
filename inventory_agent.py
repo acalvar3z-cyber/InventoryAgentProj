@@ -39,6 +39,7 @@ class InventoryModelType(Enum):
     SAFETY_STOCK_ROP = "Safety Stock & Reorder Point"
     FIXED_PERIOD_REVIEW = "Fixed-Period Review"
     NEWSVENDOR = "Newsvendor"
+    MULTICRITERIA_CLASSIFICATION = "Multicriteria Inventory Classification"
     UNKNOWN = "Unknown / General Query"
 
 
@@ -101,7 +102,18 @@ class InventoryDecisionAgent:
             InventoryModelType.SAFETY_STOCK_ROP: 0,
             InventoryModelType.FIXED_PERIOD_REVIEW: 0,
             InventoryModelType.NEWSVENDOR: 0,
+            InventoryModelType.MULTICRITERIA_CLASSIFICATION: 0,
         }
+
+        # 0. Multicriteria Inventory Classification indicators (BAN 517 Methodology)
+        if any(term in q for term in [
+            "multicriteria", "stratification", "inventory classification", "combined weighted score",
+            "pos hits", "hits score", "sales score", "final inventory class", "weighted score",
+            "point-of-sale hits", "sales class", "hits class", "pareto classification",
+        ]):
+            scores[InventoryModelType.MULTICRITERIA_CLASSIFICATION] += 12
+        if "65%" in q or "35%" in q or "final category" in q or "class a and hits" in q:
+            scores[InventoryModelType.MULTICRITERIA_CLASSIFICATION] += 6
 
         # 1. Newsvendor indicators
         if any(term in q for term in ["newsvendor", "newsboy", "single period", "salvage", "overage", "underage", "critical fractile", "critical ratio", "perishable"]):
@@ -640,6 +652,60 @@ class InventoryDecisionAgent:
             "demand_distribution": dist_type,
         }
 
+    def _extract_multicriteria_inputs(self, q: str) -> Dict[str, Any]:
+        """
+        Extracts parameters for Multicriteria Inventory Classification (BAN 517 Methodology):
+        - Sales Class (A, B, C, D)
+        - Hits Class (A, B, C, D)
+        - Sales Score (1, 2, 3, 4)
+        - Hits Score (1, 2, 3, 4)
+        - Sales Weight (defaults to 0.65)
+        - Hits Weight (defaults to 0.35)
+        """
+        # Sales Class
+        sales_class = None
+        m = re.search(r"(?:sales\s*(?:class|tier|category)\s*(?:is|=|:)?\s*([a-d])\b|class\s*([a-d])\s*sales|sales\s*(?:in|of)?\s*class\s*([a-d])\b)", q, re.IGNORECASE)
+        if m:
+            sales_class = next((g.upper() for g in m.groups() if g), None)
+
+        # Hits Class
+        hits_class = None
+        m = re.search(r"(?:(?:pos\s*)?hits\s*(?:class|tier|category)\s*(?:is|=|:)?\s*([a-d])\b|class\s*([a-d])\s*(?:pos\s*)?hits|(?:pos\s*)?hits\s*(?:in|of)?\s*class\s*([a-d])\b)", q, re.IGNORECASE)
+        if m:
+            hits_class = next((g.upper() for g in m.groups() if g), None)
+
+        # Sales Score
+        sales_score = None
+        m = re.search(r"sales\s*score\s*(?:is|=|:)?\s*([1-4])\b", q, re.IGNORECASE)
+        if m:
+            sales_score = int(m.group(1))
+
+        # Hits Score
+        hits_score = None
+        m = re.search(r"(?:pos\s*)?hits\s*score\s*(?:is|=|:)?\s*([1-4])\b", q, re.IGNORECASE)
+        if m:
+            hits_score = int(m.group(1))
+
+        # Weights
+        sales_weight = 0.65
+        m = re.search(r"(?:weight\s*(?:of|for)?\s*)?sales\s*(?:weight)?\s*(?:is|=|:)?\s*(\d+(?:\.\d+)?)\s*%", q, re.IGNORECASE)
+        if m:
+            sales_weight = float(m.group(1)) / 100.0
+
+        hits_weight = 0.35
+        m = re.search(r"(?:weight\s*(?:of|for)?\s*)?(?:pos\s*)?hits\s*(?:weight)?\s*(?:is|=|:)?\s*(\d+(?:\.\d+)?)\s*%", q, re.IGNORECASE)
+        if m:
+            hits_weight = float(m.group(1)) / 100.0
+
+        return {
+            "sales_class": sales_class,
+            "hits_class": hits_class,
+            "sales_score": sales_score,
+            "hits_score": hits_score,
+            "sales_weight": sales_weight,
+            "hits_weight": hits_weight,
+        }
+
     def extract_inputs(self, question: str, model_type: InventoryModelType) -> Dict[str, Any]:
         """
         Parses numerical and operational parameters from natural language.
@@ -657,6 +723,8 @@ class InventoryDecisionAgent:
             return self._extract_periodic_review_inputs(q)
         elif model_type == InventoryModelType.NEWSVENDOR:
             return self._extract_newsvendor_inputs(q)
+        elif model_type == InventoryModelType.MULTICRITERIA_CLASSIFICATION:
+            return self._extract_multicriteria_inputs(q)
 
         return {}
 
@@ -758,6 +826,20 @@ class InventoryDecisionAgent:
             if inputs.get("demand_distribution") is not None:
                 meanings["demand_distribution"] = f"Assumed demand distribution: {inputs['demand_distribution']}"
 
+        elif model_type == InventoryModelType.MULTICRITERIA_CLASSIFICATION:
+            if inputs.get("sales_class") is not None:
+                meanings["sales_class"] = f"Sales Pareto Tier: Class {inputs['sales_class']}"
+            if inputs.get("sales_score") is not None:
+                meanings["sales_score"] = f"Sales numerical score: {inputs['sales_score']}"
+            if inputs.get("hits_class") is not None:
+                meanings["hits_class"] = f"POS Hits Pareto Tier: Class {inputs['hits_class']}"
+            if inputs.get("hits_score") is not None:
+                meanings["hits_score"] = f"POS Hits numerical score: {inputs['hits_score']}"
+            if inputs.get("sales_weight") is not None:
+                meanings["sales_weight"] = f"Sales criterion weight: {inputs['sales_weight']*100:.1f}%"
+            if inputs.get("hits_weight") is not None:
+                meanings["hits_weight"] = f"POS Hits criterion weight: {inputs['hits_weight']*100:.1f}%"
+
         return meanings
 
     def check_missing_parameters(
@@ -848,6 +930,14 @@ class InventoryDecisionAgent:
                     "or direct underage cost (Cu) and overage cost (Co)."
                 )
 
+        elif model_type == InventoryModelType.MULTICRITERIA_CLASSIFICATION:
+            if inputs.get("sales_class") is None and inputs.get("sales_score") is None:
+                missing_params.append("Sales Class or Sales Score")
+                missing_reasons["Sales Class or Sales Score"] = "Sales Pareto tier (A, B, C, D) or numerical score (4, 3, 2, 1)."
+            if inputs.get("hits_class") is None and inputs.get("hits_score") is None:
+                missing_params.append("POS Hits Class or Hits Score")
+                missing_reasons["POS Hits Class or Hits Score"] = "Point-of-Sale Hits Pareto tier (A, B, C, D) or numerical score (4, 3, 2, 1)."
+
         is_complete = len(missing_params) == 0
         return is_complete, missing_params, missing_reasons
 
@@ -902,6 +992,7 @@ class InventoryDecisionAgent:
             InventoryModelType.SAFETY_STOCK_ROP: it.calculate_rop,
             InventoryModelType.FIXED_PERIOD_REVIEW: it.calculate_periodic_review,
             InventoryModelType.NEWSVENDOR: it.calculate_newsvendor,
+            InventoryModelType.MULTICRITERIA_CLASSIFICATION: it.calculate_multicriteria_classification,
         }
         if model_type not in mapping:
             raise ValueError(f"No calculation tool available for model type: {model_type}")

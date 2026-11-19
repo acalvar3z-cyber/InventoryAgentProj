@@ -65,6 +65,15 @@ BENCHMARK_SCENARIOS = [
             "What is the optimal order quantity, critical fractile, and expected profit?"
         ),
     },
+    {
+        "title": "Scenario 6: Multicriteria Stratification (BAN 517 Methodology)",
+        "question": (
+            "An inventory item is evaluated under the BAN 517 multicriteria classification methodology. "
+            "The item has Sales Class A and POS Hits Class B. "
+            "Using a weight of 65% for Sales and 35% for POS Hits, what is the Sales score, Hits score, "
+            "Combined Weighted Score, and Final Inventory Class?"
+        ),
+    },
 ]
 
 
@@ -244,29 +253,37 @@ def analyze_inventory_dataframe(df: Any) -> Dict[str, Any]:
 
 def classify_multicriteria_inventory(
     df: Any,
-    sales_thresholds: Tuple[float, float, float] = (0.70, 0.90, 0.98),
-    hits_thresholds: Tuple[float, float, float] = (0.70, 0.90, 0.98),
+    sales_thresholds: Tuple[float, float, float] = (0.60, 0.80, 0.90),
+    hits_thresholds: Tuple[float, float, float] = (0.60, 0.80, 0.90),
+    sales_weight: float = 0.65,
+    hits_weight: float = 0.35,
 ) -> Dict[str, Any]:
     """
-    Performs deterministic multicriteria inventory classification into A, B, C, and D classes
-    using Sales ($) and Hits.
-    Validates required columns:
-      - Item Number
-      - Item Name
-      - UoM
-      - Sales ($) (or Sales)
-      - Hits
-    Returns:
-      - valid: bool
-      - missing_columns: list
-      - rows: int
-      - columns: int
-      - column_names: list
-      - total_sales: float
-      - total_hits: int
-      - class_summary_df: pd.DataFrame
-      - crosstab_df: pd.DataFrame
-      - classified_df: pd.DataFrame
+    Performs deterministic multicriteria inventory classification per SKU (BAN 517 Methodology)
+    using two criteria: Sales and POS (Point-of-Sale) Hits.
+
+    Step 1 - Classify Sales and POS Hits Separately
+      Pareto Cumulative Thresholds:
+        A: 0-60%
+        B: 61-80%
+        C: 81-90%
+        D: 91-100%
+      Numerical Score Mapping:
+        A = 4, B = 3, C = 2, D = 1
+
+    Step 2 - Calculate the Combined Weighted Score
+      Combined Weighted Score = 0.65(Sales Score) + 0.35(Hits Score)
+
+    Step 3 - Assign the Final Inventory Class
+      Final Inventory Class | Combined Weighted Score
+      A                     | 4.00 - 3.25
+      B                     | 3.24 - 2.50
+      C                     | 2.49 - 1.75
+      D                     | < 1.75
+
+    Required Classification Summary:
+      Reports the number of items in each final category (A, B, C, D)
+      and summarizes total Sales for all items in each category.
     """
     import pandas as pd
 
@@ -295,14 +312,14 @@ def classify_multicriteria_inventory(
 
     # Check Sales
     sales_col = None
-    for cand in ["Sales ($)", "Sales", "Total Sales", "Annual Sales", "Revenue"]:
+    for cand in ["Sales ($)", "Sales", "Total Sales", "Annual Sales", "Revenue", "POS Sales"]:
         if cand in cols:
             sales_col = cand
             break
 
     # Check Hits
     hits_col = None
-    for cand in ["Hits", "Pick Hits", "Order Hits", "Transaction Hits", "Picks"]:
+    for cand in ["Hits", "POS Hits", "Point-of-Sale Hits", "POS (Point-of-Sale) Hits", "POS", "Pick Hits", "Order Hits", "Transaction Hits", "Picks"]:
         if cand in cols:
             hits_col = cand
             break
@@ -360,7 +377,7 @@ def classify_multicriteria_inventory(
             return "C"
         return "D"
 
-    # Calculate Sales Class using Pareto cumulative %
+    # Step 1: Calculate Sales Class using Pareto cumulative %
     total_sales = float(df_calc[sales_col].sum())
     if total_sales > 0:
         df_sales_sorted = df_calc.sort_values(by=sales_col, ascending=False)
@@ -370,7 +387,7 @@ def classify_multicriteria_inventory(
     else:
         df_calc["Sales Class"] = "D"
 
-    # Calculate Hits Class using Pareto cumulative %
+    # Step 1: Calculate Hits Class using Pareto cumulative %
     total_hits = int(df_calc[hits_col].sum())
     if total_hits > 0:
         df_hits_sorted = df_calc.sort_values(by=hits_col, ascending=False)
@@ -380,38 +397,38 @@ def classify_multicriteria_inventory(
     else:
         df_calc["Hits Class"] = "D"
 
-    # Joint Criteria Decision Matrix Mapping (Flores & Whybark / Multicriteria Matrix)
-    matrix_mapping = {
-        ("A", "A"): "A",
-        ("A", "B"): "A",
-        ("B", "A"): "A",
-        ("B", "B"): "B",
-        ("A", "C"): "B",
-        ("C", "A"): "B",
-        ("A", "D"): "B",
-        ("D", "A"): "B",
-        ("B", "C"): "C",
-        ("C", "B"): "C",
-        ("B", "D"): "C",
-        ("D", "B"): "C",
-        ("C", "C"): "C",
-        ("C", "D"): "D",
-        ("D", "C"): "D",
-        ("D", "D"): "D",
-    }
-
-    df_calc["Joint Class"] = df_calc["Sales Class"] + "-" + df_calc["Hits Class"]
-    df_calc["Classification"] = df_calc.apply(
-        lambda r: matrix_mapping.get((r["Sales Class"], r["Hits Class"]), "D"),
-        axis=1,
-    )
-
-    # Numerical scoring based on classification (A=4, B=3, C=2, D=1)
+    # Step 1: Numerical scoring based on classification (A=4, B=3, C=2, D=1)
     score_mapping = {"A": 4, "B": 3, "C": 2, "D": 1}
     df_calc["Sales Score"] = df_calc["Sales Class"].map(score_mapping).fillna(1).astype(int)
     df_calc["Hits Score"] = df_calc["Hits Class"].map(score_mapping).fillna(1).astype(int)
 
-    # Reorder columns to present original attributes followed by classification & scores
+    # Step 2: Calculate the Combined Weighted Score
+    # Combined Weighted Score = 0.65(Sales Score) + 0.35(Hits Score)
+    df_calc["Combined Weighted Score"] = (
+        float(sales_weight) * df_calc["Sales Score"] + float(hits_weight) * df_calc["Hits Score"]
+    ).round(2)
+
+    # Step 3: Assign Final Inventory Class
+    # Final Inventory Class | Combined Weighted Score
+    # A                     | 4.00 - 3.25
+    # B                     | 3.24 - 2.50
+    # C                     | 2.49 - 1.75
+    # D                     | < 1.75
+    def assign_final_class(score: float) -> str:
+        if score >= 3.25:
+            return "A"
+        elif score >= 2.50:
+            return "B"
+        elif score >= 1.75:
+            return "C"
+        return "D"
+
+    df_calc["Final Inventory Class"] = df_calc["Combined Weighted Score"].apply(assign_final_class)
+    # Backward compatibility alias: "Classification"
+    df_calc["Classification"] = df_calc["Final Inventory Class"]
+    df_calc["Joint Class"] = df_calc["Sales Class"] + "-" + df_calc["Hits Class"]
+
+    # Reorder columns logically per SKU: Identifiers -> Metrics -> Sales Tier/Score -> Hits Tier/Score -> Combined Score -> Final Class
     desired_cols = [
         item_num_col,
         item_name_col,
@@ -422,8 +439,10 @@ def classify_multicriteria_inventory(
         "Sales Score",
         "Hits Class",
         "Hits Score",
-        "Joint Class",
+        "Combined Weighted Score",
+        "Final Inventory Class",
         "Classification",
+        "Joint Class",
     ]
     extra_cols = [c for c in df_calc.columns if c not in desired_cols]
     df_calc = df_calc[[c for c in desired_cols if c in df_calc.columns] + extra_cols]
@@ -436,7 +455,9 @@ def classify_multicriteria_inventory(
         colnames=["Hits Class"],
     ).reindex(index=["A", "B", "C", "D"], columns=["A", "B", "C", "D"], fill_value=0)
 
-    # Class summary table
+    # Required Classification Summary
+    # Report the number of items in each final category (A, B, C, D)
+    # and summarize total Sales for all items in each category.
     strategies = {
         "A": "Top Priority: Tight daily review, weekly cycle counts, prime warehouse dock slotting",
         "B": "Moderate Priority: Standard periodic review, monthly cycle counts, moderate safety stock",
@@ -447,18 +468,21 @@ def classify_multicriteria_inventory(
     summary_rows = []
     n_items = len(df_calc)
     for c in ["A", "B", "C", "D"]:
-        sub = df_calc[df_calc["Classification"] == c]
+        sub = df_calc[df_calc["Final Inventory Class"] == c]
         cnt = len(sub)
         s_sub = float(sub[sales_col].sum())
         h_sub = int(sub[hits_col].sum())
         summary_rows.append({
-            "Class": c,
-            "SKU Count": cnt,
-            "% of SKUs": f"{(cnt / n_items * 100):.1f}%" if n_items > 0 else "0.0%",
+            "Final Category": c,
+            "Class": c,  # alias
+            "Number of Items": cnt,
+            "SKU Count": cnt,  # alias
+            "% of Items": f"{(cnt / n_items * 100):.1f}%" if n_items > 0 else "0.0%",
             "Total Sales ($)": f"${s_sub:,.2f}",
-            "% of Sales": f"{(s_sub / total_sales * 100):.1f}%" if total_sales > 0 else "0.0%",
-            "Total Hits": f"{h_sub:,}",
-            "% of Hits": f"{(h_sub / total_hits * 100):.1f}%" if total_hits > 0 else "0.0%",
+            "Total Sales Raw": s_sub,
+            "% of Total Sales": f"{(s_sub / total_sales * 100):.1f}%" if total_sales > 0 else "0.0%",
+            "Total POS Hits": f"{h_sub:,}",
+            "% of Total Hits": f"{(h_sub / total_hits * 100):.1f}%" if total_hits > 0 else "0.0%",
             "Operational Strategy": strategies.get(c, ""),
         })
     class_summary_df = pd.DataFrame(summary_rows)
@@ -473,6 +497,8 @@ def classify_multicriteria_inventory(
         "item_num_col": item_num_col,
         "item_name_col": item_name_col,
         "uom_col": uom_col,
+        "sales_weight": sales_weight,
+        "hits_weight": hits_weight,
         "total_sales": total_sales,
         "total_hits": total_hits,
         "class_summary_df": class_summary_df,
@@ -579,16 +605,17 @@ def run_streamlit_app():
             df = pd.read_csv(uploaded_file)
             cols = list(df.columns)
 
-            is_classification = any(c in cols for c in ["Sales ($)", "Sales", "Total Sales", "Annual Sales", "Revenue"]) and any(c in cols for c in ["Hits", "Picks"])
+            is_classification = any(c in cols for c in ["Sales ($)", "Sales", "Total Sales", "Annual Sales", "Revenue", "POS Sales"]) and any(c in cols for c in ["Hits", "POS Hits", "Point-of-Sale Hits", "POS (Point-of-Sale) Hits", "POS", "Picks", "Pick Hits", "Order Hits"])
             is_inventory_value = "Units" in cols and "Unit Cost" in cols
 
             # -----------------------------------------------------------------
             # Capability 1: Multicriteria Inventory Classification (A, B, C, D)
             # -----------------------------------------------------------------
             if is_classification:
-                st.header("🏷️ Multicriteria Inventory Classification (A, B, C, D Classes)")
+                st.header("🏷️ Multicriteria Inventory Stratification (BAN 517 Methodology)")
                 st.markdown(
-                    "*Evaluates inventory items across both **Financial Velocity (Sales)** and **Operational Activity (Hits)** into **A, B, C, and D** classes.*"
+                    "*Stratifies inventory items per SKU into **A, B, C, and D** classes using two criteria: "
+                    "**Sales (65% weight)** and **POS Hits (35% weight)** via the 3-step BAN 517 decision framework.*"
                 )
 
                 analysis_cls = classify_multicriteria_inventory(df)
@@ -602,28 +629,73 @@ def run_streamlit_app():
                     )
                 else:
                     # 1. Classification Overview KPIs
-                    st.subheader("1. Classification Summary Metrics")
+                    st.subheader("1. Classification Overview Metrics")
                     k1, k2, k3, k4 = st.columns(4)
                     k1.metric("Total Items", f"{analysis_cls['rows']:,}")
                     k2.metric("Total Sales", f"${analysis_cls['total_sales']:,.2f}")
-                    k3.metric("Total Warehouse Hits", f"{analysis_cls['total_hits']:,}")
-                    a_count = int(analysis_cls["class_summary_df"][analysis_cls["class_summary_df"]["Class"] == "A"]["SKU Count"].iloc[0])
+                    k3.metric("Total POS Hits", f"{analysis_cls['total_hits']:,}")
+                    a_row = analysis_cls["class_summary_df"][analysis_cls["class_summary_df"]["Class"] == "A"]
+                    a_count = int(a_row["Number of Items"].iloc[0]) if not a_row.empty else 0
                     k4.metric("Class A Items (Vital)", f"{a_count} ({a_count / analysis_cls['rows'] * 100:.1f}%)")
 
-                    # 2. Class Summary Breakdown Table
-                    st.subheader("2. Inventory Class Breakdown (A, B, C, D)")
-                    st.dataframe(analysis_cls["class_summary_df"], use_container_width=True)
+                    # 2. Required Classification Summary: Number of Items & Total Sales per Category
+                    st.subheader("2. Required Classification Summary (Items & Total Sales per Category)")
+                    st.caption("Distribution of items and total dollar sales across final inventory classes (A, B, C, D):")
+                    
+                    cat_cols = st.columns(4)
+                    for idx, c_name in enumerate(["A", "B", "C", "D"]):
+                        c_row = analysis_cls["class_summary_df"][analysis_cls["class_summary_df"]["Class"] == c_name]
+                        if not c_row.empty:
+                            cnt = int(c_row["Number of Items"].iloc[0])
+                            sales_str = str(c_row["Total Sales ($)"].iloc[0])
+                            pct_items = str(c_row["% of Items"].iloc[0])
+                            pct_sales = str(c_row["% of Total Sales"].iloc[0])
+                            cat_cols[idx].metric(
+                                f"Category {c_name}",
+                                f"{cnt} Items ({pct_items})",
+                                f"{sales_str} ({pct_sales})",
+                            )
 
-                    # 3. 2D Joint Criteria Matrix (Sales Class x Hits Class)
+                    display_summary = analysis_cls["class_summary_df"][[
+                        "Final Category", "Number of Items", "% of Items",
+                        "Total Sales ($)", "% of Total Sales", "Total POS Hits",
+                        "% of Total Hits", "Operational Strategy"
+                    ]]
+                    st.dataframe(display_summary, use_container_width=True)
+
+                    # 3. Methodology Reference Card
+                    with st.expander("ℹ️ Multicriteria Classification Methodology (BAN 517 Reference)", expanded=False):
+                        st.markdown(
+                            r"""
+                            **Step 1 - Classify Sales and POS Hits Separately (Pareto Stratification)**:
+                            - **Class A**: 0–60% cumulative percentage $\to$ Score **4**
+                            - **Class B**: 61–80% cumulative percentage $\to$ Score **3**
+                            - **Class C**: 81–90% cumulative percentage $\to$ Score **2**
+                            - **Class D**: 91–100% cumulative percentage $\to$ Score **1**
+
+                            **Step 2 - Calculate the Combined Weighted Score**:
+                            $$\text{Combined Weighted Score} = 0.65(\text{Sales Score}) + 0.35(\text{Hits Score})$$
+
+                            **Step 3 - Assign the Final Inventory Class**:
+                            | Final Inventory Class | Combined Weighted Score |
+                            | :---: | :---: |
+                            | **A** | $4.00 - 3.25$ |
+                            | **B** | $3.24 - 2.50$ |
+                            | **C** | $2.49 - 1.75$ |
+                            | **D** | $< 1.75$ |
+                            """
+                        )
+
+                    # 4. 2D Joint Criteria Matrix (Sales Class x Hits Class)
                     st.subheader("3. Joint Criteria Cross-Tabulation Matrix (Sales × Hits)")
                     st.caption("Distribution of SKUs mapped by Sales Class (rows) and Hits Class (columns):")
                     st.dataframe(analysis_cls["crosstab_df"], use_container_width=True)
 
-                    # 4. Interactive Dataframe with Classification Results
-                    st.subheader("4. Class-Annotated Inventory Dataframe")
+                    # 5. Interactive Dataframe with Classification Results per SKU
+                    st.subheader("4. Class-Annotated Inventory Dataframe (Per SKU)")
                     col_f1, col_f2 = st.columns([1, 2])
                     filter_class = col_f1.selectbox(
-                        "Filter by Class:",
+                        "Filter by Final Inventory Class:",
                         ["All Classes (A, B, C, D)", "Class A", "Class B", "Class C", "Class D"],
                     )
                     search_query = col_f2.text_input("Search Item Number or Name:", "")
@@ -631,7 +703,7 @@ def run_streamlit_app():
                     filtered_df = analysis_cls["classified_df"].copy()
                     if filter_class != "All Classes (A, B, C, D)":
                         c_target = filter_class.split()[-1]
-                        filtered_df = filtered_df[filtered_df["Classification"] == c_target]
+                        filtered_df = filtered_df[filtered_df["Final Inventory Class"] == c_target]
 
                     if search_query.strip():
                         q_lower = search_query.strip().lower()
@@ -650,6 +722,7 @@ def run_streamlit_app():
                             h_col: "{:,.0f}",
                             "Sales Score": "{:d}",
                             "Hits Score": "{:d}",
+                            "Combined Weighted Score": "{:.2f}",
                         }),
                         use_container_width=True,
                     )
