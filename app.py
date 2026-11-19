@@ -242,6 +242,223 @@ def analyze_inventory_dataframe(df: Any) -> Dict[str, Any]:
     }
 
 
+def classify_multicriteria_inventory(
+    df: Any,
+    sales_thresholds: Tuple[float, float, float] = (0.70, 0.90, 0.98),
+    hits_thresholds: Tuple[float, float, float] = (0.70, 0.90, 0.98),
+) -> Dict[str, Any]:
+    """
+    Performs deterministic multicriteria inventory classification into A, B, C, and D classes
+    using Sales ($) and Hits.
+    Validates required columns:
+      - Item Number
+      - Item Name
+      - UoM
+      - Sales ($) (or Sales)
+      - Hits
+    Returns:
+      - valid: bool
+      - missing_columns: list
+      - rows: int
+      - columns: int
+      - column_names: list
+      - total_sales: float
+      - total_hits: int
+      - class_summary_df: pd.DataFrame
+      - crosstab_df: pd.DataFrame
+      - classified_df: pd.DataFrame
+    """
+    import pandas as pd
+
+    cols = list(df.columns)
+
+    # Check Item Number
+    item_num_col = None
+    for cand in ["Item Number", "Item #", "Item No", "SKU", "Item ID", "Item"]:
+        if cand in cols:
+            item_num_col = cand
+            break
+
+    # Check Item Name
+    item_name_col = None
+    for cand in ["Item Name", "Description", "Product", "Product Name", "Name"]:
+        if cand in cols:
+            item_name_col = cand
+            break
+
+    # Check UoM
+    uom_col = None
+    for cand in ["UoM", "UOM", "Unit of Measure", "Unit"]:
+        if cand in cols:
+            uom_col = cand
+            break
+
+    # Check Sales
+    sales_col = None
+    for cand in ["Sales ($)", "Sales", "Total Sales", "Annual Sales", "Revenue"]:
+        if cand in cols:
+            sales_col = cand
+            break
+
+    # Check Hits
+    hits_col = None
+    for cand in ["Hits", "Pick Hits", "Order Hits", "Transaction Hits", "Picks"]:
+        if cand in cols:
+            hits_col = cand
+            break
+
+    missing = []
+    if not item_num_col:
+        missing.append("Item Number")
+    if not item_name_col:
+        missing.append("Item Name")
+    if not uom_col:
+        missing.append("UoM")
+    if not sales_col:
+        missing.append("Sales ($)")
+    if not hits_col:
+        missing.append("Hits")
+
+    if missing:
+        return {
+            "valid": False,
+            "missing_columns": missing,
+            "found_columns": cols,
+            "rows": len(df),
+            "columns": len(cols),
+        }
+
+    df_calc = df.copy()
+
+    # Clean and parse Sales
+    if df_calc[sales_col].dtype == object:
+        df_calc[sales_col] = (
+            df_calc[sales_col]
+            .astype(str)
+            .str.replace("$", "", regex=False)
+            .str.replace(",", "", regex=False)
+            .str.strip()
+        )
+    df_calc[sales_col] = pd.to_numeric(df_calc[sales_col], errors="coerce").fillna(0.0)
+
+    # Clean and parse Hits
+    if df_calc[hits_col].dtype == object:
+        df_calc[hits_col] = (
+            df_calc[hits_col]
+            .astype(str)
+            .str.replace(",", "", regex=False)
+            .str.strip()
+        )
+    df_calc[hits_col] = pd.to_numeric(df_calc[hits_col], errors="coerce").fillna(0).astype(int)
+
+    def assign_tier(val: float, cutoffs: Tuple[float, float, float]) -> str:
+        if val <= cutoffs[0]:
+            return "A"
+        elif val <= cutoffs[1]:
+            return "B"
+        elif val <= cutoffs[2]:
+            return "C"
+        return "D"
+
+    # Calculate Sales Class using Pareto cumulative %
+    total_sales = float(df_calc[sales_col].sum())
+    if total_sales > 0:
+        df_sales_sorted = df_calc.sort_values(by=sales_col, ascending=False)
+        cum_sales = df_sales_sorted[sales_col].cumsum()
+        cum_sales_pct = cum_sales / total_sales
+        df_calc["Sales Class"] = cum_sales_pct.apply(lambda x: assign_tier(x, sales_thresholds))
+    else:
+        df_calc["Sales Class"] = "D"
+
+    # Calculate Hits Class using Pareto cumulative %
+    total_hits = int(df_calc[hits_col].sum())
+    if total_hits > 0:
+        df_hits_sorted = df_calc.sort_values(by=hits_col, ascending=False)
+        cum_hits = df_hits_sorted[hits_col].cumsum()
+        cum_hits_pct = cum_hits / total_hits
+        df_calc["Hits Class"] = cum_hits_pct.apply(lambda x: assign_tier(x, hits_thresholds))
+    else:
+        df_calc["Hits Class"] = "D"
+
+    # Joint Criteria Decision Matrix Mapping (Flores & Whybark / Multicriteria Matrix)
+    matrix_mapping = {
+        ("A", "A"): "A",
+        ("A", "B"): "A",
+        ("B", "A"): "A",
+        ("B", "B"): "B",
+        ("A", "C"): "B",
+        ("C", "A"): "B",
+        ("A", "D"): "B",
+        ("D", "A"): "B",
+        ("B", "C"): "C",
+        ("C", "B"): "C",
+        ("B", "D"): "C",
+        ("D", "B"): "C",
+        ("C", "C"): "C",
+        ("C", "D"): "D",
+        ("D", "C"): "D",
+        ("D", "D"): "D",
+    }
+
+    df_calc["Joint Class"] = df_calc["Sales Class"] + "-" + df_calc["Hits Class"]
+    df_calc["Classification"] = df_calc.apply(
+        lambda r: matrix_mapping.get((r["Sales Class"], r["Hits Class"]), "D"),
+        axis=1,
+    )
+
+    # Cross-tabulation Matrix (Sales Class x Hits Class)
+    crosstab_df = pd.crosstab(
+        df_calc["Sales Class"],
+        df_calc["Hits Class"],
+        rownames=["Sales Class"],
+        colnames=["Hits Class"],
+    ).reindex(index=["A", "B", "C", "D"], columns=["A", "B", "C", "D"], fill_value=0)
+
+    # Class summary table
+    strategies = {
+        "A": "Top Priority: Tight daily review, weekly cycle counts, prime warehouse dock slotting",
+        "B": "Moderate Priority: Standard periodic review, monthly cycle counts, moderate safety stock",
+        "C": "Low Priority: Automated reorder point/min-max control, high order batches, low physical priority",
+        "D": "Minimal/Tail: Dead stock / slow mover review, zero buffer, evaluate for clearance or phase-out",
+    }
+
+    summary_rows = []
+    n_items = len(df_calc)
+    for c in ["A", "B", "C", "D"]:
+        sub = df_calc[df_calc["Classification"] == c]
+        cnt = len(sub)
+        s_sub = float(sub[sales_col].sum())
+        h_sub = int(sub[hits_col].sum())
+        summary_rows.append({
+            "Class": c,
+            "SKU Count": cnt,
+            "% of SKUs": f"{(cnt / n_items * 100):.1f}%" if n_items > 0 else "0.0%",
+            "Total Sales ($)": f"${s_sub:,.2f}",
+            "% of Sales": f"{(s_sub / total_sales * 100):.1f}%" if total_sales > 0 else "0.0%",
+            "Total Hits": f"{h_sub:,}",
+            "% of Hits": f"{(h_sub / total_hits * 100):.1f}%" if total_hits > 0 else "0.0%",
+            "Operational Strategy": strategies.get(c, ""),
+        })
+    class_summary_df = pd.DataFrame(summary_rows)
+
+    return {
+        "valid": True,
+        "rows": n_items,
+        "columns": len(cols),
+        "column_names": cols,
+        "sales_col": sales_col,
+        "hits_col": hits_col,
+        "item_num_col": item_num_col,
+        "item_name_col": item_name_col,
+        "uom_col": uom_col,
+        "total_sales": total_sales,
+        "total_hits": total_hits,
+        "class_summary_df": class_summary_df,
+        "crosstab_df": crosstab_df,
+        "classified_df": df_calc,
+    }
+
+
 def run_streamlit_app():
     """
     Renders the Streamlit Web Application when launched via `streamlit run app.py`.
@@ -334,59 +551,142 @@ def run_streamlit_app():
         import pandas as pd
 
         st.markdown("---")
-        st.header("📊 Uploaded Inventory Data Analysis")
 
         try:
-            # 1. Read the CSV file into a pandas DataFrame
+            # 1. Read the CSV file into a pandas DataFrame using single existing uploader
             df = pd.read_csv(uploaded_file)
+            cols = list(df.columns)
 
-            # Analyze the dataframe using pandas
-            analysis = analyze_inventory_dataframe(df)
+            is_classification = any(c in cols for c in ["Sales ($)", "Sales", "Total Sales", "Annual Sales", "Revenue"]) and any(c in cols for c in ["Hits", "Picks"])
+            is_inventory_value = "Units" in cols and "Unit Cost" in cols
 
-            # 2 & 3. Validate columns and display clear error message if missing
-            if not analysis["valid"]:
-                st.error(
-                    f"❌ **Validation Error**: The uploaded CSV file is missing required column(s): "
-                    f"**{', '.join(analysis['missing_columns'])}**.\n\n"
-                    f"Required columns are: `Product, Category, Units, Unit Cost`.\n\n"
-                    f"Columns found in uploaded file: `{', '.join(analysis['found_columns'])}`."
+            # -----------------------------------------------------------------
+            # Capability 1: Multicriteria Inventory Classification (A, B, C, D)
+            # -----------------------------------------------------------------
+            if is_classification:
+                st.header("🏷️ Multicriteria Inventory Classification (A, B, C, D Classes)")
+                st.markdown(
+                    "*Evaluates inventory items across both **Financial Velocity (Sales)** and **Operational Activity (Hits)** into **A, B, C, and D** classes.*"
                 )
-            else:
-                # 4 & 5. Display uploaded dataframe metadata and raw table in main page
-                st.subheader("1. Dataset Overview & Dimensions")
-                meta_col1, meta_col2, meta_col3 = st.columns(3)
-                meta_col1.metric("Number of Rows", f"{analysis['rows']:,}")
-                meta_col2.metric("Number of Columns", f"{analysis['columns']:,}")
-                meta_col3.write(f"**Column Names:**\n`{', '.join(analysis['column_names'])}`")
 
-                st.caption("Uploaded Raw Dataframe Preview:")
-                st.dataframe(df, use_container_width=True)
+                analysis_cls = classify_multicriteria_inventory(df)
 
-                # RESULTS: Display results clearly in main application
-                st.subheader("2. Summary Metrics")
-                kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-                kpi1.metric("Total Units", f"{analysis['total_units']:,.0f}")
-                kpi2.metric("Average Unit Cost", f"${analysis['avg_unit_cost']:,.2f}")
-                kpi3.metric("Highest Units Product", analysis["product_highest_units"], f"{analysis['highest_units_val']:,.0f} units")
-                kpi4.metric("Total Inventory Value", f"${analysis['total_inventory_value']:,.2f}")
+                if not analysis_cls["valid"]:
+                    st.error(
+                        f"❌ **Validation Error**: The uploaded classification file is missing required column(s): "
+                        f"**{', '.join(analysis_cls['missing_columns'])}**.\n\n"
+                        f"Required columns for classification: `Item Number, Item Name, UoM, Sales ($), Hits`.\n\n"
+                        f"Columns detected: `{', '.join(analysis_cls['found_columns'])}`."
+                    )
+                else:
+                    # 1. Classification Overview KPIs
+                    st.subheader("1. Classification Summary Metrics")
+                    k1, k2, k3, k4 = st.columns(4)
+                    k1.metric("Total Items", f"{analysis_cls['rows']:,}")
+                    k2.metric("Total Sales", f"${analysis_cls['total_sales']:,.2f}")
+                    k3.metric("Total Warehouse Hits", f"{analysis_cls['total_hits']:,}")
+                    a_count = int(analysis_cls["class_summary_df"][analysis_cls["class_summary_df"]["Class"] == "A"]["SKU Count"].iloc[0])
+                    k4.metric("Class A Items (Vital)", f"{a_count} ({a_count / analysis_cls['rows'] * 100:.1f}%)")
 
-                # Total Units by Category
-                st.subheader("3. Total Units by Category")
-                st.dataframe(analysis["category_units_df"], use_container_width=True)
+                    # 2. Class Summary Breakdown Table
+                    st.subheader("2. Inventory Class Breakdown (A, B, C, D)")
+                    st.dataframe(analysis_cls["class_summary_df"], use_container_width=True)
 
-                # Dataframe including the new Inventory Value column with currency formatting
-                st.subheader("4. Inventory Data with Calculated Inventory Value")
-                st.dataframe(
-                    analysis["analyzed_df"].style.format({
-                        "Units": "{:,.0f}",
-                        "Unit Cost": "${:,.2f}",
-                        "Inventory Value": "${:,.2f}",
-                    }),
-                    use_container_width=True,
+                    # 3. 2D Joint Criteria Matrix (Sales Class x Hits Class)
+                    st.subheader("3. Joint Criteria Cross-Tabulation Matrix (Sales × Hits)")
+                    st.caption("Distribution of SKUs mapped by Sales Class (rows) and Hits Class (columns):")
+                    st.dataframe(analysis_cls["crosstab_df"], use_container_width=True)
+
+                    # 4. Interactive Dataframe with Classification Results
+                    st.subheader("4. Class-Annotated Inventory Dataframe")
+                    col_f1, col_f2 = st.columns([1, 2])
+                    filter_class = col_f1.selectbox(
+                        "Filter by Class:",
+                        ["All Classes (A, B, C, D)", "Class A", "Class B", "Class C", "Class D"],
+                    )
+                    search_query = col_f2.text_input("Search Item Number or Name:", "")
+
+                    filtered_df = analysis_cls["classified_df"].copy()
+                    if filter_class != "All Classes (A, B, C, D)":
+                        c_target = filter_class.split()[-1]
+                        filtered_df = filtered_df[filtered_df["Classification"] == c_target]
+
+                    if search_query.strip():
+                        q_lower = search_query.strip().lower()
+                        s_mask = (
+                            filtered_df[analysis_cls["item_num_col"]].astype(str).str.lower().str.contains(q_lower) |
+                            filtered_df[analysis_cls["item_name_col"]].astype(str).str.lower().str.contains(q_lower)
+                        )
+                        filtered_df = filtered_df[s_mask]
+
+                    s_col = analysis_cls["sales_col"]
+                    h_col = analysis_cls["hits_col"]
+
+                    st.dataframe(
+                        filtered_df.style.format({
+                            s_col: "${:,.2f}",
+                            h_col: "{:,.0f}",
+                        }),
+                        use_container_width=True,
+                    )
+
+            # -----------------------------------------------------------------
+            # Capability 2: Inventory Value & Category Analysis
+            # -----------------------------------------------------------------
+            if is_inventory_value:
+                st.header("📊 Inventory Value & Category Analysis")
+                analysis_val = analyze_inventory_dataframe(df)
+
+                if not analysis_val["valid"]:
+                    st.error(
+                        f"❌ **Validation Error**: The uploaded CSV file is missing required column(s): "
+                        f"**{', '.join(analysis_val['missing_columns'])}**.\n\n"
+                        f"Required columns: `Product, Category, Units, Unit Cost`.\n\n"
+                        f"Columns detected: `{', '.join(analysis_val['found_columns'])}`."
+                    )
+                else:
+                    st.subheader("1. Dataset Overview & Dimensions")
+                    m1, m2, m3 = st.columns(3)
+                    m1.metric("Number of Rows", f"{analysis_val['rows']:,}")
+                    m2.metric("Number of Columns", f"{analysis_val['columns']:,}")
+                    m3.write(f"**Column Names:**\n`{', '.join(analysis_val['column_names'])}`")
+
+                    st.caption("Uploaded Raw Dataframe Preview:")
+                    st.dataframe(df, use_container_width=True)
+
+                    st.subheader("2. Summary Metrics")
+                    kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+                    kpi1.metric("Total Units", f"{analysis_val['total_units']:,.0f}")
+                    kpi2.metric("Average Unit Cost", f"${analysis_val['avg_unit_cost']:,.2f}")
+                    kpi3.metric("Highest Units Product", analysis_val["product_highest_units"], f"{analysis_val['highest_units_val']:,.0f} units")
+                    kpi4.metric("Total Inventory Value", f"${analysis_val['total_inventory_value']:,.2f}")
+
+                    st.subheader("3. Total Units by Category")
+                    st.dataframe(analysis_val["category_units_df"], use_container_width=True)
+
+                    st.subheader("4. Inventory Data with Calculated Inventory Value")
+                    st.dataframe(
+                        analysis_val["analyzed_df"].style.format({
+                            "Units": "{:,.0f}",
+                            "Unit Cost": "${:,.2f}",
+                            "Inventory Value": "${:,.2f}",
+                        }),
+                        use_container_width=True,
+                    )
+
+            # -----------------------------------------------------------------
+            # Fallback if neither schema matches
+            # -----------------------------------------------------------------
+            if not is_classification and not is_inventory_value:
+                st.error(
+                    f"❌ **Unrecognized CSV Schema**: Found columns: `{', '.join(cols)}`.\n\n"
+                    f"Supported schemas:\n"
+                    f"- **Multicriteria Inventory Classification**: `Item Number, Item Name, UoM, Sales ($), Hits`\n"
+                    f"- **Inventory Value & Category Analysis**: `Product, Category, Units, Unit Cost`"
                 )
 
         except Exception as err:
-            st.error(f"❌ Error reading or analyzing CSV file: {err}")
+            st.error(f"❌ Error processing uploaded CSV file: {err}")
 
 
 
