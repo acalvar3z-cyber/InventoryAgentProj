@@ -1,0 +1,15 @@
+# Core Dependencies for Supply Chain Analytics Inventory Decision Agent
+# Note: The calculation engine and decision agent run out-of-the-box using the 
+# Python 3.8+ Standard Library (math, statistics.NormalDist, dataclasses, re, json, unittest).
+
+# Testing & Extended Verification
+pytest>=7.4.0
+
+# Scientific & Advanced Analytics (Optional)
+scipy>=1.10.0
+numpy>=1.24.0
+
+# Interactive Dashboard & Presentation UI (Optional)
+streamlit>=1.26.0
+rich>=13.4.0
+tabulate>=0.9.0
